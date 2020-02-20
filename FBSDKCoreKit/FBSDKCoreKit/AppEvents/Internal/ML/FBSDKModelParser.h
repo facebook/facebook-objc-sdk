@@ -22,13 +22,20 @@
 
 #import <Foundation/Foundation.h>
 
+#import "FBSDKStandaloneModel.hpp"
+
 NS_ASSUME_NONNULL_BEGIN
 
-@interface FBSDKAddressInferencer : NSObject
+typedef NS_ENUM(NSUInteger, FBSDKMTMLTask) {
+    FBSDKMTMLTaskAddressDetect,
+    FBSDKMTMLTaskAppEventPred
+};
 
-+ (void)initializeDenseFeature;
-+ (void)loadWeightsForKey:(NSString *)useCaseKey;
-+ (BOOL)shouldFilterParam:(nullable NSString *)param;
+@interface FBSDKModelParser : NSObject
+
++ (std::unordered_map<std::string, mat::MTensor>)parseWeightsData:(NSData *)weightsData;
++ (bool)validateWeights:(std::unordered_map<std::string, mat::MTensor>)weights forTask:(FBSDKMTMLTask)task;
++ (bool)validateMTMLWeights:(std::unordered_map<std::string, mat::MTensor>)weights;
 
 @end
 

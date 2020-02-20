@@ -26,37 +26,36 @@
 
 #import "FBSDKFeatureExtractor.h"
 #import "FBSDKModelManager.h"
+#import "FBSDKModelParser.h"
 #import "FBSDKModelRuntime.hpp"
 #import "FBSDKModelUtility.h"
 #import "FBSDKViewHierarchyMacros.h"
 
 #include<stdexcept>
 
+using std::exception;
+using std::fill;
+using std::string;
+using std::unordered_map;
+using std::vector;
+using mat::mempty;
+using mat::MTensor;
+using mat1::predictOnText;
+
 static NSString *const MODEL_INFO_KEY= @"com.facebook.sdk:FBSDKModelInfo";
 static NSString *const THRESHOLDS_KEY = @"thresholds";
 static NSString *const SUGGESTED_EVENT[4] = {@"fb_mobile_add_to_cart", @"fb_mobile_complete_registration", @"other", @"fb_mobile_purchase"};
 static NSDictionary<NSString *, NSString *> *const DEFAULT_PREDICTION = @{SUGGEST_EVENT_KEY: SUGGESTED_EVENTS_OTHER};
-static NSDictionary<NSString *, NSArray *> *const WEIGHTS_INFO = @{@"embed.weight" : @[@(256), @(64)],
-                                                                   @"convs.0.weight" : @[@(32), @(64), @(2)],
-                                                                   @"convs.0.bias" : @[@(32)],
-                                                                   @"convs.1.weight" : @[@(32), @(64), @(3)],
-                                                                   @"convs.1.bias" : @[@(32)],
-                                                                   @"convs.2.weight" : @[@(32), @(64), @(5)],
-                                                                   @"convs.2.bias" : @[@(32)],
-                                                                   @"fc1.weight": @[@(128), @(126)],
-                                                                   @"fc1.bias": @[@(128)],
-                                                                   @"fc2.weight": @[@(64), @(128)],
-                                                                   @"fc2.bias": @[@(64)],
-                                                                   @"fc3.weight": @[@(4), @(64)],
-                                                                   @"fc3.bias": @[@(4)]};
 
-static std::unordered_map<std::string, mat::MTensor> _weights;
+static unordered_map<string, MTensor> _weights;
+
+NS_ASSUME_NONNULL_BEGIN
 
 @implementation FBSDKEventInferencer : NSObject
 
-+ (void)loadWeights
++ (void)loadWeightsForKey:(NSString *)useCaseKey
 {
-  NSString *path = [FBSDKModelManager getWeightsPath:SUGGEST_EVENT_KEY];
+  NSString *path = [FBSDKModelManager getWeightsPath:useCaseKey];
   if (!path) {
     return;
   }
@@ -66,96 +65,10 @@ static std::unordered_map<std::string, mat::MTensor> _weights;
   if (!latestData) {
     return;
   }
-  std::unordered_map<std::string, mat::MTensor> weights = [self loadWeights:latestData];
-  if ([self validateWeights:weights]) {
+  unordered_map<string, MTensor> weights = [FBSDKModelParser parseWeightsData:latestData];
+  if ([FBSDKModelParser validateWeights:weights forTask:FBSDKMTMLTaskAppEventPred]) {
     _weights = weights;
   }
-}
-
-+ (bool)validateWeights: (std::unordered_map<std::string, mat::MTensor>) weights
-{
-  if (WEIGHTS_INFO.count != weights.size()) {
-    return false;
-  }
-  try {
-    for (NSString *key in WEIGHTS_INFO) {
-      if (weights.count(std::string([key UTF8String])) == 0) {
-        return false;
-      }
-      mat::MTensor tensor = weights[std::string([key UTF8String])];
-      const std::vector<int64_t>& actualSize = tensor.sizes();
-      NSArray *expectedSize = WEIGHTS_INFO[key];
-      if (actualSize.size() != expectedSize.count) {
-        return false;
-      }
-      for (int i = 0; i < expectedSize.count; i++) {
-        if((int)actualSize[i] != (int)[expectedSize[i] intValue]) {
-          return false;
-        }
-      }
-    }
-  } catch (const std::exception &e) {
-    return false;
-  }
-  return true;
-}
-
-+ (std::unordered_map<std::string, mat::MTensor>)loadWeights:(NSData *)weightsData{
-  std::unordered_map<std::string,  mat::MTensor> weights;
-  try {
-    const void *data = weightsData.bytes;
-    NSUInteger totalLength =  weightsData.length;
-
-    int totalFloats = 0;
-    if (weightsData.length < 4) {
-      // Make sure data length is valid
-      return weights;
-    }
-
-    int length;
-    memcpy(&length, data, 4);
-    if (length + 4 > totalLength) {
-      // Make sure data length is valid
-      return weights;
-    }
-
-    char *json = (char *)data + 4;
-    NSDictionary<NSString *, id> *info = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:length]
-                                                                         options:0
-                                                                           error:nil];
-    NSArray<NSString *> *keys = [[info allKeys] sortedArrayUsingComparator:^NSComparisonResult(NSString *key1, NSString *key2) {
-      return [key1 compare:key2];
-    }];
-
-    float *floats = (float *)(json + length);
-    for (NSString *key in keys) {
-      std::string s_name([key UTF8String]);
-
-      std::vector<int64_t> v_shape;
-      NSArray<NSString *> *shape = [info objectForKey:key];
-      int count = 1;
-      for (NSNumber *_s in shape) {
-        int i = [_s intValue];
-        v_shape.push_back(i);
-        count *= i;
-      }
-
-      totalFloats += count;
-
-      if ((4 + length + totalFloats * 4) > totalLength) {
-        // Make sure data length is valid
-        break;
-      }
-      mat::MTensor tensor = mat::mempty(v_shape);
-      float *tensor_data = tensor.data<float>();
-      memcpy(tensor_data, floats, sizeof(float) * count);
-      floats += count;
-
-      weights[s_name] = tensor;
-    }
-  } catch(const std::exception &e) {}
-
-  return weights;
 }
 
 + (NSDictionary<NSString *, NSString *> *)predict:(NSString *)buttonText
@@ -177,10 +90,10 @@ static std::unordered_map<std::string, mat::MTensor> _weights;
     }
 
     // Get dense tensor
-    std::vector<int64_t> dense_tensor_shape;
+    vector<int64_t> dense_tensor_shape;
     dense_tensor_shape.push_back(1);
     dense_tensor_shape.push_back(30);
-    mat::MTensor dense_tensor = mat::mempty(dense_tensor_shape);
+    MTensor dense_tensor = mempty(dense_tensor_shape);
     float *dense_tensor_data = dense_tensor.data<float>();
     float *dense_data = [FBSDKFeatureExtractor getDenseFeatures:viewTree];
     if (!dense_data) {
@@ -198,7 +111,7 @@ static std::unordered_map<std::string, mat::MTensor> _weights;
 
     memcpy(dense_tensor_data, dense_data, sizeof(float) * 30);
     free(dense_data);
-    float *res = mat1::predictOnText(bytes, _weights, dense_tensor_data);
+    float *res = predictOnText(bytes, _weights, dense_tensor_data);
     NSMutableDictionary<NSString *, id> *modelInfo = [[NSUserDefaults standardUserDefaults] objectForKey:MODEL_INFO_KEY];
     if (!modelInfo) {
       return DEFAULT_PREDICTION;
@@ -218,10 +131,12 @@ static std::unordered_map<std::string, mat::MTensor> _weights;
         return result;
       }
     }
-  } catch (const std::exception &e) {}
+  } catch (const exception &e) {}
   return DEFAULT_PREDICTION;
 }
 
 @end
+
+NS_ASSUME_NONNULL_END
 
 #endif
